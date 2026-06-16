@@ -1,288 +1,348 @@
 #!/bin/bash
 
-# --- Настройки ---
+# ============================================
+# ЗАГРУЗКА ПЕРЕМЕННЫХ ИЗ .env
+# ============================================
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | xargs)
+fi
+
+# Telegram
+BOT_TOKEN="${TG_BOT_TOKEN:-}"
+CHAT_ID="${TG_CHAT_ID:-}"
+THREAD_ID="${TG_THREAD_ID_BACKUP:-}"
+
+# ============================================
+# КОНФИГУРАЦИЯ
+# ============================================
 BACKUP_DIR="${BACKUP_DIR:-/home/fellk/home-stack/backups}"
-RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-TEMP_BACKUP_FILE="/tmp/secure-stack_$TIMESTAMP.tar.gz"
-FINAL_BACKUP_FILE="$BACKUP_DIR/secure-stack_$TIMESTAMP.tar.gz.gpg"
 PASSPHRASE_FILE="/home/fellk/.backup_passphrase"
 LOG_FILE="/home/fellk/home-stack/backup.log"
-TEST_DIR="/tmp/backup_test_$TIMESTAMP"
+RCLONE_CONFIG="/home/fellk/.config/rclone/rclone.conf"
+REMOTE_NAME="Yandex-Disk"
+REMOTE_PATH="Backup/VPS_Германия"
+TEST_DIR="/tmp/backup-test-$(date +%s)"
 
-# --- Яндекс.Диск настройки (rclone) ---
-RCLONE_REMOTE="Yandex-Disk"
-RCLONE_PATH="Backup/VPS_Германия"
-RCLONE_CONFIG="/home/fellk/.config/rclone/rclone.conf"  # ВАЖНО: путь к конфигу
-
-# --- Telegram настройки ---
-BOT_TOKEN="${TG_BOT_TOKEN}"
-CHAT_ID="${TG_CHAT_ID}"
-THREAD_ID="${TG_THREAD_ID_BACKUP}"
-
-# --- Функция логирования ---
+# ============================================
+# ФУНКЦИИ
+# ============================================
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
-# --- Функция отправки в Telegram ---
 send_telegram() {
     local message="$1"
-    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
-        -d "chat_id=$CHAT_ID" \
-        -d "message_thread_id=$THREAD_ID" \
-        -d "text=$message" \
-        -d "parse_mode=HTML" > /dev/null 2>&1
+    if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
+        local url="https://api.telegram.org/bot${BOT_TOKEN}/sendMessage"
+        local payload="chat_id=${CHAT_ID}&text=${message}&parse_mode=HTML"
+        if [ -n "$THREAD_ID" ]; then
+            payload="${payload}&message_thread_id=${THREAD_ID}"
+        fi
+        curl -s -X POST "$url" -d "$payload" > /dev/null 2>&1
+    fi
 }
 
-# --- Функция тестирования бэкапа ---
+# ============================================
+# ФУНКЦИЯ ПОЛНОГО ТЕСТИРОВАНИЯ
+# ============================================
 test_backup() {
-    local backup_file="$1"
-    local test_result="✅"
+    local encrypted_file="$1"
+    local test_dir="$2"
     
-    log "🧪 Начинаем тестирование бэкапа: $(basename "$backup_file")"
+    log "🧪 ПОЛНОЕ ТЕСТИРОВАНИЕ БЭКАПА..."
     
-    # 1. Проверяем, что файл существует и не пустой
-    if [ ! -f "$backup_file" ] || [ ! -s "$backup_file" ]; then
-        log "❌ Файл бэкапа не существует или пуст"
-        echo "❌" > /tmp/backup_test_result
-        echo "Файл не существует или пуст" > /tmp/backup_test_messages
+    # 1. Проверка существования файла
+    if [ ! -f "$encrypted_file" ]; then
+        log "   ❌ Файл не найден: $encrypted_file"
         return 1
     fi
-    log "   ✅ Файл существует и не пуст"
+    log "   ✅ Файл существует"
     
-    # 2. Проверяем целостность GPG-файла
-    log "   Проверка GPG-подписи/целостности..."
-    if gpg --batch --passphrase-file "$PASSPHRASE_FILE" --decrypt "$backup_file" > /dev/null 2>&1; then
-        log "   ✅ GPG-файл целостен и может быть расшифрован"
-    else
-        log "   ❌ ОШИБКА: Не удалось расшифровать файл GPG"
-        echo "❌" > /tmp/backup_test_result
-        echo "Ошибка расшифровки GPG" > /tmp/backup_test_messages
+    # 2. Проверка GPG
+    log "   🔍 Проверка GPG..."
+    if ! gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" --decrypt "$encrypted_file" > /dev/null 2>&1; then
+        log "   ❌ GPG ошибка — файл поврежден или неверный пароль"
         return 1
     fi
+    log "   ✅ GPG OK — файл может быть расшифрован"
     
-    # 3. Создаем временную директорию для тестовой распаковки
-    mkdir -p "$TEST_DIR"
+    # 3. Создаем временную папку для восстановления
+    mkdir -p "$test_dir"
+    log "   📁 Временная папка: $test_dir"
     
-    # 4. Расшифровываем и проверяем архив
-    log "   Распаковка архива для проверки структуры..."
-    if gpg --batch --passphrase-file "$PASSPHRASE_FILE" --decrypt "$backup_file" 2>/dev/null | tar -tzf - > /dev/null 2>&1; then
-        log "   ✅ Архив успешно прочитан (список файлов получен)"
-    else
-        log "   ❌ ОШИБКА: Не удалось прочитать содержимое архива"
-        echo "❌" > /tmp/backup_test_result
-        echo "Ошибка чтения архива" > /tmp/backup_test_messages
-        rm -rf "$TEST_DIR"
+    # 4. Распаковка архива
+    log "   📦 Распаковка архива..."
+    if ! gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" -d "$encrypted_file" | tar -xz -C "$test_dir" 2>/dev/null; then
+        log "   ❌ Ошибка распаковки архива"
+        rm -rf "$test_dir"
         return 1
     fi
+    log "   ✅ Архив успешно распакован"
     
-    # 5. Проверка структуры backup
-    log "   Проверка структуры backup (чтение списка файлов)..."
+    # 5. Проверка структуры
+    log "   🔍 Проверка структуры..."
     
-    FILE_LIST=$(gpg --batch --passphrase-file "$PASSPHRASE_FILE" --decrypt "$backup_file" 2>/dev/null | tar -tzf - 2>/dev/null)
+    local errors=0
+    local checks=0
     
-    if [ -n "$FILE_LIST" ]; then
-        # Проверяем наличие критических файлов
-        if echo "$FILE_LIST" | grep -q "docker-compose.yml"; then
-            log "   ✅ Найден docker-compose.yml"
+    # Список критических файлов, которые должны быть в бэкапе
+    critical_files=(
+        "docker-compose.yml"
+        "backup.sh"
+        "check_stack.sh"
+        "README.md"
+        "LICENSE"
+        ".env.example"
+        ".gitignore"
+        "monitoring/prometheus.yml"
+        "monitoring/loki-config.yaml"
+        "monitoring/mimir-config.yaml"
+        "monitoring/alertmanager.yml.example"
+        "reports/xui_clients_report.py"
+    )
+    
+    log "   📋 Проверка критических файлов:"
+    for file in "${critical_files[@]}"; do
+        checks=$((checks + 1))
+        if [ -f "$test_dir/$file" ]; then
+            log "     ✅ $file"
         else
-            log "   ⚠️ В архиве не найден docker-compose.yml (возможно, это нормально)"
+            log "     ❌ $file — ОТСУТСТВУЕТ!"
+            errors=$((errors + 1))
         fi
-        
-        if echo "$FILE_LIST" | grep -q "monitoring/prometheus.yml"; then
-            log "   ✅ Найден prometheus.yml"
+    done
+    
+    # 6. Проверка YAML синтаксиса
+    log "   🔍 Проверка YAML файлов..."
+    local yaml_errors=0
+    for yaml_file in $(find "$test_dir" -name "*.yml" -o -name "*.yaml" 2>/dev/null); do
+        if command -v yq &> /dev/null; then
+            if ! yq eval 'true' "$yaml_file" > /dev/null 2>&1; then
+                log "     ❌ Ошибка YAML: $(basename "$yaml_file")"
+                yaml_errors=$((yaml_errors + 1))
+            fi
         else
-            log "   ⚠️ В архиве не найден prometheus.yml"
+            # Если yq нет, проверяем с помощью python
+            if command -v python3 &> /dev/null; then
+                if ! python3 -c "import yaml; yaml.safe_load(open('$yaml_file'))" 2>/dev/null; then
+                    log "     ❌ Ошибка YAML: $(basename "$yaml_file")"
+                    yaml_errors=$((yaml_errors + 1))
+                fi
+            fi
         fi
-        
-        FILE_COUNT=$(echo "$FILE_LIST" | wc -l)
-        log "   📊 Всего файлов в архиве: $FILE_COUNT"
-        
-        if [ $FILE_COUNT -lt 20 ]; then
-            log "   ⚠️ В архиве очень мало файлов ($FILE_COUNT). Возможно, архив поврежден."
-        fi
-    else
-        log "   ❌ Не удалось получить список файлов архива"
-        echo "❌" > /tmp/backup_test_result
-        echo "Не удалось получить список файлов" > /tmp/backup_test_messages
-        rm -rf "$TEST_DIR"
-        return 1
+    done
+    
+    if [ $yaml_errors -eq 0 ] && [ -n "$(find "$test_dir" -name "*.yml" 2>/dev/null)" ]; then
+        log "   ✅ Все YAML файлы валидны"
     fi
     
-    # 6. Очистка
-    rm -rf "$TEST_DIR"
-    log "   🧹 Временная директория удалена"
+    # 7. Проверка Docker Compose
+    if [ -f "$test_dir/docker-compose.yml" ]; then
+        log "   🔍 Проверка docker-compose.yml..."
+        if command -v docker-compose &> /dev/null; then
+            if docker-compose -f "$test_dir/docker-compose.yml" config > /dev/null 2>&1; then
+                log "   ✅ docker-compose.yml валиден"
+            else
+                log "   ❌ docker-compose.yml содержит ошибки"
+                errors=$((errors + 1))
+            fi
+        fi
+    fi
     
-    # 7. Итоговый результат
-    log "✅ Тестирование бэкапа прошло успешно!"
-    echo "✅" > /tmp/backup_test_result
-    echo "Все проверки пройдены" > /tmp/backup_test_messages
-    return 0
+    # 8. Проверка размера
+    local size=$(du -sh "$encrypted_file" | cut -f1)
+    log "   📊 Размер бэкапа: $size"
+    
+    # 9. Количество файлов
+    local file_count=$(find "$test_dir" -type f 2>/dev/null | wc -l)
+    log "   📊 Количество файлов: $file_count"
+    
+    # 10. Очистка
+    log "   🧹 Очистка временной папки..."
+    rm -rf "$test_dir"
+    
+    # Итог
+    if [ $errors -eq 0 ]; then
+        log "   ✅ ✅ ✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ УСПЕШНО!"
+        TEST_RESULT="✅ FULL OK (${checks} проверок, ${file_count} файлов)"
+        return 0
+    else
+        log "   ❌ ❌ ❌ НАЙДЕНО $errors ОШИБОК!"
+        TEST_RESULT="❌ Ошибок: $errors (${checks} проверок)"
+        return 1
+    fi
 }
 
-# --- Начало скрипта ---
+# ============================================
+# ОСНОВНАЯ ЛОГИКА
+# ============================================
 log "=========================================="
 log "🚀 Запуск процесса резервного копирования"
-
-# 1. Создаём директорию для бэкапов
-mkdir -p "$BACKUP_DIR"
 log "📁 Локальная директория бэкапов: $BACKUP_DIR"
 
-# 2. Проверяем/создаём файл с паролем
-if [ ! -f "$PASSPHRASE_FILE" ]; then
-    log "🔑 Создаём новый файл с паролем: $PASSPHRASE_FILE"
-    openssl rand -base64 32 > "$PASSPHRASE_FILE"
-    chmod 600 "$PASSPHRASE_FILE"
+mkdir -p "$BACKUP_DIR"
+
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+BACKUP_FILE="${BACKUP_DIR}/secure-stack_${TIMESTAMP}.tar.gz"
+ENCRYPTED_FILE="${BACKUP_FILE}.gpg"
+
+# ============================================
+# СОЗДАНИЕ АРХИВА
+# ============================================
+log "📦 Создание архива..."
+
+# 1. Конфиги и скрипты
+tar -czf "$BACKUP_FILE" \
+    backup.sh \
+    check_stack.sh \
+    docker-compose.yml \
+    README.md \
+    LICENSE \
+    .env.example \
+    .gitignore \
+    .gitmodules \
+    monitoring/*.yml \
+    monitoring/*.yaml \
+    monitoring/*.example \
+    reports/ \
+    xui-api-exporter-repo/ \
+    2>/dev/null || true
+
+# 2. Конфиги NPM (без сертификатов)
+if [ -d "npm/data/nginx" ]; then
+    log "   📁 Добавляем конфиги NPM..."
+    tar -rf "$BACKUP_FILE" \
+        npm/data/nginx/proxy_host/*.conf \
+        npm/data/nginx/redirection_host/*.conf \
+        npm/data/nginx/default_host/*.conf \
+        npm/data/nginx/stream/*.conf \
+        npm/data/nginx/dead_host/*.conf \
+        npm/data/nginx/temp/*.conf \
+        2>/dev/null || true
 fi
 
-# 3. Проверка прав root
-if [[ $EUID -ne 0 ]]; then
-    log "❌ ОШИБКА: Скрипт должен быть запущен от root"
-    log "   Используйте: sudo $0"
-    send_telegram "❌ <b>ОШИБКА бэкапа</b>%0AСкрипт должен быть запущен от root"
-    exit 1
+# 3. База данных NPM
+if [ -f "npm/data/database.sqlite" ]; then
+    log "   📁 Добавляем базу данных NPM..."
+    tar -rf "$BACKUP_FILE" \
+        npm/data/database.sqlite \
+        2>/dev/null || true
 fi
 
-# 4. Создание архива
-log "📦 Создание и шифрование архива..."
+# 4. Конфиги LetsEncrypt (без сертификатов)
+if [ -d "npm/letsencrypt/renewal" ]; then
+    log "   📁 Добавляем конфиги LetsEncrypt..."
+    tar -rf "$BACKUP_FILE" \
+        npm/letsencrypt/renewal/*.conf \
+        2>/dev/null || true
+fi
 
-cd /home/fellk/home-stack || {
-    log "❌ ОШИБКА: Не удалось перейти в директорию /home/fellk/home-stack"
-    send_telegram "❌ <b>ОШИБКА бэкапа</b>%0AНе удалось перейти в директорию home-stack"
-    exit 1
-}
+# 5. База данных XUI
+if [ -f "xui/db/x-ui.db" ]; then
+    log "   📁 Добавляем базу данных XUI..."
+    tar -rf "$BACKUP_FILE" \
+        xui/db/x-ui.db \
+        2>/dev/null || true
+fi
 
-# Создаём архив с исключениями
-tar -cpzf "$TEMP_BACKUP_FILE" \
-    --exclude='./backups' \
-    --exclude='./monitoring/prometheus-data' \
-    --exclude='./monitoring/loki-data' \
-    --exclude='./monitoring/mimir-data' \
-    --exclude='./xui-api-exporter-repo' \
-    --exclude='./.git' \
-    --exclude='*.log' \
-    --exclude='./node_modules' \
-    --exclude='./backup.sh' \
-    . 2>/dev/null
-
-TAR_EXIT_CODE=$?
-
-if [ $TAR_EXIT_CODE -eq 0 ] || [ $TAR_EXIT_CODE -eq 1 ]; then
-    log "✅ Архив tar создан (код: $TAR_EXIT_CODE)"
+if [ $? -eq 0 ] && [ -f "$BACKUP_FILE" ]; then
+    SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+    log "✅ Архив создан (размер: $SIZE)"
 else
-    log "❌ Фатальная ошибка при создании архива (код: $TAR_EXIT_CODE)"
-    send_telegram "❌ <b>ОШИБКА бэкапа</b>%0AФатальная ошибка при создании архива (код: $TAR_EXIT_CODE)"
+    log "❌ Ошибка создания архива"
+    send_telegram "❌ <b>Ошибка бэкапа!</b>%0AНе удалось создать архив"
     exit 1
 fi
 
-# Шифруем архив
+# ============================================
+# ШИФРОВАНИЕ
+# ============================================
 log "🔒 Шифрование архива..."
-gpg --symmetric --batch --passphrase-file "$PASSPHRASE_FILE" -o "$FINAL_BACKUP_FILE" "$TEMP_BACKUP_FILE"
 
-if [ $? -eq 0 ]; then
-    FILE_SIZE=$(du -h "$FINAL_BACKUP_FILE" | cut -f1)
+if [ ! -f "$PASSPHRASE_FILE" ]; then
+    log "❌ Файл с паролем не найден: $PASSPHRASE_FILE"
+    send_telegram "❌ <b>Ошибка бэкапа!</b>%0AФайл с паролем не найден"
+    exit 1
+fi
+
+gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" -c "$BACKUP_FILE"
+
+if [ $? -eq 0 ] && [ -f "$ENCRYPTED_FILE" ]; then
+    SIZE=$(du -h "$ENCRYPTED_FILE" | cut -f1)
     log "✅ Бэкап создан успешно!"
-    log "   Имя: $(basename "$FINAL_BACKUP_FILE")"
-    log "   Размер: $FILE_SIZE"
+    log "   Имя: $(basename "$ENCRYPTED_FILE")"
+    log "   Размер: $SIZE"
+    rm -f "$BACKUP_FILE"
 else
-    log "❌ ОШИБКА: Не удалось зашифровать архив"
-    send_telegram "❌ <b>ОШИБКА бэкапа</b>%0AНе удалось зашифровать архив"
-    rm -f "$TEMP_BACKUP_FILE"
+    log "❌ Ошибка шифрования"
+    send_telegram "❌ <b>Ошибка бэкапа!</b>%0AНе удалось зашифровать архив"
     exit 1
 fi
 
-# Удаляем временный файл
-rm -f "$TEMP_BACKUP_FILE"
-log "🧹 Временный файл удалён"
-
-# 5. Загрузка на Яндекс.Диск с помощью rclone
-log "☁️  Загрузка файла на Яндекс.Диск ($RCLONE_REMOTE:$RCLONE_PATH)..."
-
-if ! command -v rclone &> /dev/null; then
-    log "❌ ОШИБКА: Утилита 'rclone' не установлена"
-    send_telegram "❌ <b>ОШИБКА бэкапа</b>%0AУтилита rclone не установлена.%0AУстановите: sudo apt install rclone"
-    exit 1
-fi
-
-# Проверяем, что файл существует
-if [ ! -f "$FINAL_BACKUP_FILE" ]; then
-    log "❌ ОШИБКА: Файл бэкапа не найден: $FINAL_BACKUP_FILE"
-    UPLOAD_STATUS="❌ Ошибка: файл не найден"
-else
-    # Создаем папку на Яндекс.Диске, если её нет
-    log "   Создание папки на Яндекс.Диске (если не существует)..."
-    rclone --config "$RCLONE_CONFIG" mkdir "$RCLONE_REMOTE:$RCLONE_PATH" 2>> "$LOG_FILE"
+# ============================================
+# ЗАГРУЗКА НА ЯНДЕКС.ДИСК
+# ============================================
+if command -v rclone &> /dev/null && [ -f "$RCLONE_CONFIG" ]; then
+    log "☁️  Загрузка файла на Яндекс.Диск..."
+    rclone --config "$RCLONE_CONFIG" mkdir "${REMOTE_NAME}:${REMOTE_PATH}" 2>/dev/null || true
+    rclone --config "$RCLONE_CONFIG" copy "$ENCRYPTED_FILE" "${REMOTE_NAME}:${REMOTE_PATH}/" --progress
     
-    # Копируем файл на Яндекс.Диск
-    log "   Загрузка файла (размер: $FILE_SIZE)..."
-    
-    # Загружаем и сохраняем вывод
-    RCLONE_OUTPUT=$(rclone --config "$RCLONE_CONFIG" copy --verbose "$FINAL_BACKUP_FILE" "$RCLONE_REMOTE:$RCLONE_PATH" 2>&1)
-    RCLONE_EXIT_CODE=$?
-    
-    # Записываем вывод в лог (для отладки)
-    if [ -n "$RCLONE_OUTPUT" ]; then
-        echo "$RCLONE_OUTPUT" >> "$LOG_FILE"
-    fi
-    
-    if [ $RCLONE_EXIT_CODE -eq 0 ]; then
-        log "✅ Файл успешно загружен на Яндекс.Диск в папку /$RCLONE_PATH"
-        UPLOAD_STATUS="✅ Загружен на Яндекс.Диск"
+    if [ $? -eq 0 ]; then
+        log "✅ Файл успешно загружен на Яндекс.Диск"
+        UPLOAD_STATUS="✅ Загружен"
     else
-        log "❌ ОШИБКА: Не удалось загрузить файл на Яндекс.Диск (код: $RCLONE_EXIT_CODE)"
-        log "   Подробности ошибки в логе выше"
-        UPLOAD_STATUS="❌ Ошибка загрузки (код: $RCLONE_EXIT_CODE)"
+        log "❌ Ошибка загрузки на Яндекс.Диск"
+        UPLOAD_STATUS="❌ Ошибка"
     fi
-fi
-
-# 6. Тестирование созданного бэкапа
-test_backup "$FINAL_BACKUP_FILE"
-TEST_RESULT=$(cat /tmp/backup_test_result 2>/dev/null || echo "❌")
-TEST_MESSAGES=$(cat /tmp/backup_test_messages 2>/dev/null || echo "Ошибка тестирования")
-
-# 7. Удаление старых бэкапов (локально)
-log "🗑️  Удаление локальных бэкапов старше $RETENTION_DAYS дней..."
-
-DELETED_COUNT=0
-OLD_BACKUPS=$(find "$BACKUP_DIR" -name "secure-stack_*.tar.gz.gpg" -type f -mtime +$RETENTION_DAYS)
-
-if [ -n "$OLD_BACKUPS" ]; then
-    DELETED_COUNT=$(echo "$OLD_BACKUPS" | wc -l)
-    log "   Найдено старых бэкапов: $DELETED_COUNT"
-    
-    echo "$OLD_BACKUPS" | while read -r file; do
-        rm -f "$file"
-        log "   Удалён: $(basename "$file")"
-    done
-    log "✅ Удалено $DELETED_COUNT старых локальных бэкапов"
 else
-    log "ℹ️  Старых локальных бэкапов для удаления не найдено"
+    log "⚠️ rclone не настроен, пропускаем загрузку"
+    UPLOAD_STATUS="⏭️ Пропущено"
 fi
 
-# 8. Статистика
-TOTAL_BACKUPS=$(find "$BACKUP_DIR" -name "secure-stack_*.tar.gz.gpg" -type f | wc -l)
-TOTAL_SIZE=$(du -sh "$BACKUP_DIR" | cut -f1)
+# ============================================
+# ПОЛНОЕ ТЕСТИРОВАНИЕ БЭКАПА
+# ============================================
+TEST_DIR="/tmp/backup-test-$(date +%s)"
+test_backup "$ENCRYPTED_FILE" "$TEST_DIR"
+TEST_EXIT_CODE=$?
+
+# ============================================
+# УДАЛЕНИЕ СТАРЫХ БЭКАПОВ
+# ============================================
+log "🗑️ Удаление бэкапов старше 30 дней..."
+find "$BACKUP_DIR" -name "*.gpg" -type f -mtime +30 -delete 2>/dev/null
+
+# ============================================
+# СТАТИСТИКА
+# ============================================
+BACKUP_COUNT=$(find "$BACKUP_DIR" -name "*.gpg" -type f 2>/dev/null | wc -l)
+BACKUP_SIZE=$(du -sh "$BACKUP_DIR" 2>/dev/null | cut -f1)
 
 log "📊 Итоговая статистика:"
-log "   - Локальных бэкапов: $TOTAL_BACKUPS, общий размер: $TOTAL_SIZE"
-log "   - Загрузка на Яндекс.Диск: $UPLOAD_STATUS"
-log "   - Результат тестирования: $TEST_RESULT"
+log "   - Локальных бэкапов: $BACKUP_COUNT, размер: $BACKUP_SIZE"
+log "   - Загрузка: $UPLOAD_STATUS"
+log "   - Тест: $TEST_RESULT"
 
-# 9. Отправка уведомления в Telegram
+# ============================================
+# УВЕДОМЛЕНИЕ
+# ============================================
 log "📨 Отправка уведомления в Telegram (топик $THREAD_ID)..."
 
-MESSAGE="✅ <b>Резервное копирование завершено</b>%0A%0A"
-MESSAGE+="📦 <b>Файл:</b> secure-stack_$TIMESTAMP.tar.gz.gpg%0A"
-MESSAGE+="📊 <b>Размер:</b> $FILE_SIZE%0A"
-MESSAGE+="☁️ <b>Статус загрузки:</b> $UPLOAD_STATUS%0A"
-MESSAGE+="🧪 <b>Результат тестирования:</b> $TEST_RESULT%0A"
-MESSAGE+="📁 <b>Локальных бэкапов:</b> $TOTAL_BACKUPS%0A"
-MESSAGE+="🗑️ <b>Удалено старых:</b> $DELETED_COUNT%0A%0A"
-MESSAGE+="🕐 <b>Время:</b> $(date '+%Y-%m-%d %H:%M:%S')"
+SIZE=$(du -h "$ENCRYPTED_FILE" | cut -f1)
+MESSAGE="✅ <b>Резервное копирование завершено!</b>%0A%0A"
+MESSAGE="${MESSAGE}📁 <b>Файл:</b> $(basename "$ENCRYPTED_FILE")%0A"
+MESSAGE="${MESSAGE}📦 <b>Размер:</b> $SIZE%0A"
+MESSAGE="${MESSAGE}📊 <b>Локальных бэкапов:</b> $BACKUP_COUNT%0A"
+MESSAGE="${MESSAGE}💾 <b>Общий размер:</b> $BACKUP_SIZE%0A"
+MESSAGE="${MESSAGE}☁️ <b>Яндекс.Диск:</b> $UPLOAD_STATUS%0A"
+MESSAGE="${MESSAGE}🧪 <b>Тест:</b> $TEST_RESULT%0A"
+MESSAGE="${MESSAGE}📅 <b>Дата:</b> $(date '+%Y-%m-%d %H:%M:%S')"
 
 send_telegram "$MESSAGE"
-log "✅ Уведомление отправлено"
 
-log "✅ Резервное копирование завершено успешно!"
+if [ $TEST_EXIT_CODE -eq 0 ]; then
+    log "✅ Резервное копирование завершено успешно!"
+else
+    log "⚠️ Резервное копирование завершено, но тесты показали ошибки!"
+fi
 log "=========================================="
