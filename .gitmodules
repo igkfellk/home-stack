@@ -1,0 +1,3 @@
+[submodule "xui-api-exporter-repo"]
+	path = xui-api-exporter-repo
+	url = https://github.com/igkfellk/xui-api-exporter.git

@@ -1,0 +1,85 @@
+# ============================================
+# Секреты и конфиденциальные данные
+# ============================================
+.env
+.env.local
+.env.*.local
+.backup_passphrase
+
+# ============================================
+# Данные приложений (не коммитить!)
+# ============================================
+# Бэкапы
+backups/
+*.tar.gz
+*.tar.gz.gpg
+*.log
+backup.log
+
+# Данные мониторинга
+monitoring/prometheus-data/
+monitoring/loki-data/
+monitoring/mimir-data/
+monitoring/grafana/
+monitoring/csv/
+monitoring/pdf/
+monitoring/png/
+monitoring/unified-search/
+monitoring/*.db
+monitoring/*.db-shm
+monitoring/*.db-wal
+monitoring/prometheus-auth
+monitoring/prometheus-auth*
+
+# Данные NPM
+npm/data/
+npm/letsencrypt/
+
+# Данные XUI
+xui/db/
+xui/cert/
+
+# Данные MongoDB
+mtg/mongo-data/
+mtg/diagnostic.data/
+mtg/journal/
+
+# AlertManager с секретами
+monitoring/alertmanager.yml
+
+# ============================================
+# Дубликаты и временные файлы
+# ============================================
+xui-exporter/
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+*.pyo
+*.so
+.Python
+
+# ============================================
+# Логи
+# ============================================
+*.log
+logs/
+*.log.*
+*.gz
+
+# ============================================
+# IDE
+# ============================================
+.vscode/
+.idea/
+*.iml
+
+# ============================================
+# Отчеты и временные данные
+# ============================================
+tree_home_stack.txt
+*.tree.txt

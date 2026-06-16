@@ -1,0 +1,242 @@
+version: '3.8'
+
+services:
+  nginx-proxy-manager:
+    image: jc21/nginx-proxy-manager:latest
+    container_name: npm
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '81:81'
+      - '443:443'
+    volumes:
+      - ./npm/data:/data
+      - ./npm/letsencrypt:/etc/letsencrypt
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  xui:
+    image: ghcr.io/mhsanaei/3x-ui:latest
+    container_name: xui
+    restart: unless-stopped
+    command: ["x-ui"]
+    ports:
+      - "9443:9443"
+      - "9444:9444"
+      - "9445:9445"
+      - "9446:9446"
+      - "9447:9447"
+      - "9448:9448"
+      - "9449:9449"
+    volumes:
+      - ./xui/db:/etc/x-ui
+      - ./xui/cert:/root/cert
+      - /etc/letsencrypt/live/${XUI_DOMAIN}:/etc/letsencrypt/live/${XUI_DOMAIN}:ro
+      - /etc/letsencrypt/archive/${XUI_DOMAIN}:/etc/letsencrypt/archive/${XUI_DOMAIN}:ro
+    environment:
+      - XRAY_VMESS_AEAD_FORCED=false
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mtg:
+    image: nineseconds/mtg:latest
+    container_name: mtg
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    command: simple-run 0.0.0.0:8443 ${MTG_HEX_SECRET}
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mongodb:
+    image: mongo:6.0
+    container_name: mtg-mongo
+    restart: unless-stopped
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=${MTG_MONGO_ROOT_PASS}
+    volumes:
+      - ./mtg/mongo-data:/data/db
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  xui-api-exporter:
+    image: ghcr.io/igkfellk/xui-api-exporter:latest
+    container_name: xui-api-exporter
+    restart: unless-stopped
+    environment:
+      - XUI_URL=http://xui:2053
+      - XUI_API_TOKEN=${XUI_API_TOKEN}
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./monitoring/prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=90d'
+      - '--storage.tsdb.retention.size=50GB'
+      - '--web.enable-lifecycle'
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  mimir:
+    image: grafana/mimir:latest
+    container_name: mimir
+    restart: unless-stopped
+    command: ["-config.file=/etc/mimir/config.yaml"]
+    volumes:
+      - ./monitoring/mimir-config.yaml:/etc/mimir/config.yaml:ro
+      - ./monitoring/mimir-data:/data
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GF_SECURITY_ADMIN_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GF_SECURITY_ADMIN_PASS}
+    volumes:
+      - ./monitoring/grafana:/var/lib/grafana
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/config.yaml
+    volumes:
+      - ./monitoring/loki-config.yaml:/etc/loki/config.yaml:ro
+      - ./monitoring/loki-data:/loki
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    restart: unless-stopped
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./monitoring/promtail-config.yaml:/etc/promtail/config.yaml:ro
+    command: -config.file=/etc/promtail/config.yaml
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  xui-clients-reporter:
+    build:
+      context: ./reports
+      dockerfile: Dockerfile
+    container_name: xui-clients-reporter
+    restart: unless-stopped
+    environment:
+      - PROMETHEUS_URL=http://prometheus:9090
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN}
+      - TG_CHAT_ID=${TG_CHAT_ID}
+      - TG_THREAD_ID=${TG_THREAD_ID}
+    networks:
+      - vpn-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  vpn-net:
+    driver: bridge

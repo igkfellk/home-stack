@@ -1,0 +1,166 @@
+# alert.rules.yml
+groups:
+  # ГРУППА 1: Системные оповещения (Node Exporter)
+  - name: node_exporter_alerts
+    rules:
+      # 1.1 Сервер (нода) не отвечает
+      - alert: NodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервер не отвечает"
+          description: "Метрики Node Exporter не поступают с хоста уже больше минуты."
+
+      # 1.2 Высокая загрузка CPU
+      - alert: HighCpuLoad
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая загрузка CPU"
+          description: "Загрузка CPU на {{ $labels.instance }} превысила 80% в течение 5 минут. Текущее значение: {{ $value | printf \"%.1f\" }}%."
+
+      # 1.3 Нехватка оперативной памяти
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Критическое использование памяти"
+          description: "Использование RAM на {{ $labels.instance }} превысило 85% в течение 5 минут. Текущее значение: {{ $value | printf \"%.1f\" }}%."
+
+      # 1.4 Нехватка места на диске
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100 < 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Заканчивается место на диске"
+          description: "Осталось менее 10% свободного места на разделе {{ $labels.mountpoint }}. Текущее значение: {{ $value | printf \"%.1f\" }}%."
+
+  # ГРУППА 2: Расширенные оповещения для 3X-UI API Exporter
+  - name: xui_exporter_alerts
+    rules:
+      # 2.1 Экспортер 3X-UI не работает
+      - alert: XUIExporterDown
+        expr: up{job="xui-api-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервис 3X-UI Exporter не работает"
+          description: "Метрики от 3X-UI экспортера не поступают больше минуты."
+
+      # 2.2 Высокая нагрузка на CPU панели
+      - alert: XUIHighCpuUsage
+        expr: xui_system_cpu_usage_percent > 80
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокая загрузка CPU панели 3X-UI"
+          description: "CPU панели 3X-UI превышает 80% в течение 10 минут. Текущее значение: {{ $value | printf \"%.1f\" }}%."
+
+      # 2.3 Высокое использование памяти панели
+      - alert: XUIHighMemoryUsage
+        expr: (xui_system_memory_used_bytes / xui_system_memory_total_bytes) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Высокое использование памяти панелью 3X-UI"
+          description: "Использование памяти панелью превысило 85% в течение 10 минут. Текущее значение: {{ $value | printf \"%.1f\" }}%."
+
+      # 2.4 Заканчивается место на диске панели
+      - alert: XUILowDiskSpace
+        expr: (xui_system_disk_used_bytes / xui_system_disk_total_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Заканчивается место на диске панели 3X-UI"
+          description: "На диске панели осталось менее 10% свободного места. Текущее использование: {{ $value | printf \"%.1f\" }}%."
+
+      # 2.5 Сервис Xray не запущен
+      - alert: XrayServiceNotRunning
+        expr: xui_xray_state == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Сервис Xray на панели 3X-UI остановлен"
+          description: "Сервис Xray не запущен или не отвечает. Входящие подключения невозможны."
+
+      # 2.6 Нет активных клиентов
+      - alert: ZeroVPNClientsOnline
+        expr: xui_online_clients == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Нет активных VPN-клиентов"
+          description: "В течение последних 30 минут не было ни одного онлайн-клиента на панели 3X-UI."
+
+      # 2.7 Клиент не подключался более 24 часов
+      - alert: ClientOfflineForLongTime
+        expr: xui_client_online == 0
+        for: 24h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Клиент {{ $labels.email }} не подключался более 24 часов"
+          description: "Клиент {{ $labels.email }} отсутствует в сети дольше суток. Возможно, стоит проверить статус его ключа."
+
+      # 2.8 Прогнозируемое истечение срока клиента (НОВОЕ)
+      - alert: ClientExpiresSoon
+        expr: (xui_client_expire_timestamp - time()) < 86400
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "У клиента {{ $labels.email }} истекает срок подписки"
+          description: "Срок подписки клиента {{ $labels.email }} истекает менее чем через 24 часа."
+
+      # 2.9 Аномальный расход трафика клиентом (НОВОЕ)
+      - alert: ClientTrafficSpike
+        expr: |
+          (
+            sum(rate(xui_client_up_bytes_total[5m]) + rate(xui_client_down_bytes_total[5m])) by (email)
+            /
+            (avg_over_time(sum(rate(xui_client_up_bytes_total[24h]) + rate(xui_client_down_bytes_total[24h])) by (email)[24h:]) + 1)
+          ) > 3
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Аномальный трафик у клиента {{ $labels.email }}"
+          description: "Клиент {{ $labels.email }} потребляет в 3+ раза больше трафика, чем обычно за последние 24 часа. Проверьте возможные утечки или проблемы."
+
+      # 2.10 Нет данных о клиентах (экспортер работает, но панель не отвечает)
+      - alert: XUIClientsDataMissing
+        expr: xui_total_clients == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Нет данных о клиентах от 3X-UI панели"
+          description: "Экспортер работает, но с панели не приходят данные о клиентах (xui_total_clients == 0). Возможно, проблема с API или панелью 3X-UI."
+
+  # ТЕСТОВАЯ ГРУППА - для проверки уведомлений
+#  - name: test_notifications
+#    rules:
+#      - alert: TestNotification
+#        expr: vector(1)  # Всегда истинно
+#        for: 10s
+#        labels:
+#          severity: critical
+#          job: test
+#        annotations:
+#          summary: "🔔 ТЕСТОВОЕ УВЕДОМЛЕНИЕ"
+#          description: "Это тестовый алерт. Если вы его видите — всё работает правильно!"
+

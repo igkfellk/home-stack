@@ -1,0 +1,112 @@
+global:
+  # Таймаут для разрешения ситуации с упавшим алертом
+  resolve_timeout: 5m
+
+# Настройка шаблонов для красивого форматирования сообщений
+templates:
+  - './*.tmpl'
+
+route:
+  # Группировка алертов по имени и задаче (уменьшает количество сообщений) [citation:3]
+  group_by: ['alertname', 'job']
+  # Время ожидания перед отправкой первой группы алертов
+  group_wait: 30s
+  # Интервал между отправками обновлений по группе
+  group_interval: 5m
+  # Интервал повторной отправки уже отправленного алерта
+  repeat_interval: 3h
+  # Приемник по умолчанию (куда идут все алерты, если нет подходящего маршрута)
+  receiver: 'telegram-alerts'
+
+  # Список маршрутов для разных приемников
+  routes:
+    # --- МАРШРУТ 1: Все критичные системные алерты в Telegram ---
+    # Сработает, если в метках есть severity: critical и job: node-exporter
+    - match:
+        severity: critical
+        job: node-exporter
+      # Приемник, настроенный для Telegram
+      receiver: 'telegram-alerts'
+      # Не продолжать проверку других маршрутов для этого алерта
+      continue: false
+
+    # --- МАРШРУТ 2: Все алерты для 3X-UI в Telegram ---
+    # Сработает для любого алерта, где job = xui-api-exporter
+    - match:
+        job: xui-api-exporter
+      receiver: 'telegram-alerts'
+      continue: false
+
+    # --- МАРШРУТ 3: Все остальные Warning-алерты на Email ---
+    # Здесь будут обрабатываться алерты, которые не попали под правила выше
+    - match:
+        severity: warning
+    #  receiver: 'email-alerts'
+      receiver: 'telegram-alerts'
+      continue: false
+
+    # --- МАРШРУТ ДЛЯ ТЕСТОВЫХ АЛЕРТОВ ---
+    - match:
+        job: test
+      receiver: 'telegram-alerts'
+      continue: false
+
+# Секция, где объявляются приемники (куда отправлять)
+receivers:
+  # --- ПРИЕМНИК 1: Уведомления в Telegram ---
+  - name: 'telegram-alerts'
+    telegram_configs:
+      - api_url: 'https://api.telegram.org'
+        bot_token: 'YOUR_TELEGRAM_BOT_TOKEN_HERE'
+        chat_id: YOUR_TELEGRAM_CHAT_ID_HERE
+        message_thread_id: 96
+        parse_mode: 'HTML'
+        send_resolved: true
+        message: |
+          {{- $alertCount := len .Alerts -}}
+          {{- if eq $alertCount 1 -}}
+            {{- range .Alerts -}}
+              {{- if eq .Status "firing" }}🚨 <b>ПРОБЛЕМА</b>{{ else }}✅ <b>ПРОБЛЕМА РЕШЕНА</b>{{ end }}
+          ━━━━━━━━━━━━━━━━━━━━━━━
+          <b>{{ .Annotations.summary }}</b>
+
+          {{ .Annotations.description -}}
+          {{- if .Annotations.value }}
+          📊 <b>Значение:</b> {{ .Annotations.value }}
+          {{- end }}
+          📍 <b>Источник:</b> <code>{{ .Labels.job }}</code>
+          {{- if eq .Status "firing" }}
+          🔥 <b>Важность:</b> {{- if eq .Labels.severity "critical" }} <b>КРИТИЧНЫЙ</b> 🛑{{ else if eq .Labels.severity "warning" }} <b>ПРЕДУПРЕЖДЕНИЕ</b> ⚠️{{ else }} <b>{{ .Labels.severity | toUpper }}</b>{{ end }}
+          {{- end }}
+          🕐 <b>Время:</b> <code>{{ .StartsAt.Format "15:04:05" }}</code>
+          ━━━━━━━━━━━━━━━━━━━━━━━
+            {{- end }}
+          {{- else }}
+          📬 <b>{{ $alertCount }} ПРОБЛЕМА ТРЕБУЕТ ВНИМАНИЯ</b>
+          ━━━━━━━━━━━━━━━━━━━━━━━
+          {{- range .Alerts }}
+          {{- if eq .Status "firing" }}🔴{{ else }}🟢{{ end }} <b>{{ .Annotations.summary }}</b> [{{ .Labels.job }}]{{- if .Annotations.description }} – {{ .Annotations.description }}{{ end }}
+          {{- end }}
+          ━━━━━━━━━━━━━━━━━━━━━━━
+          🔗 <a href="{{ (index .Alerts 0).GeneratorURL }}">Все алерты в Prometheus</a>
+          {{- end }}
+
+  # --- ПРИЕМНИК 2: Уведомления на Email ---
+  - name: 'email-alerts'
+    email_configs:
+      - to: 'name@yandex.ru'
+        from: 'name@yandex.ru'
+        smarthost: 'smtp.yandex.ru:587'
+        auth_username: 'name@yandex.ru'
+        auth_identity: 'name@yandex.ru'
+        auth_password: 'PASS'
+        headers:
+          Subject: '[ПРЕДУПРЕЖДЕНИЕ] Prometheus Alert'
+        html: |
+          <h2>Правило сработало: {{ .GroupLabels.alertname }}</h2>
+          {{ range .Alerts }}
+            <p><strong>Сообщение:</strong> {{ .Annotations.summary }}</p>
+            <p><strong>Детали:</strong> {{ .Annotations.description }}</p>
+            <p><strong>Серьезность:</strong> {{ .Labels.severity }}</p>
+            <hr>
+          {{ end }}
