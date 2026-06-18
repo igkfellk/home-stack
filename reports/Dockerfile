@@ -1,15 +1,16 @@
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y cron && \
-    pip install requests && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends cron procps \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY xui_clients_report.py /app/daily_report.py
+RUN pip install --no-cache-dir requests
+
 WORKDIR /app
+COPY xui_clients_report.py /app/daily_report.py
+COPY crontab /etc/cron.d/daily-report
 
-# Каждый день в 9:00
-RUN echo "0 9 * * * cd /app && python3 /app/daily_report.py >> /var/log/cron.log 2>&1" > /etc/cron.d/daily-report && \
-    chmod 0644 /etc/cron.d/daily-report && \
+RUN chmod 0644 /etc/cron.d/daily-report && \
+    crontab /etc/cron.d/daily-report && \
     touch /var/log/cron.log
 
-CMD ["cron", "-f"]
+CMD ["cron", "-f", "-L", "/var/log/cron.log"]
