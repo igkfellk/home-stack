@@ -1,8 +1,2 @@
-# Передаём переменные окружения в cron
-TG_BOT_TOKEN=${TG_BOT_TOKEN}
-TG_CHAT_ID=${TG_CHAT_ID}
-TG_THREAD_ID=${TG_THREAD_ID}
-PROMETHEUS_URL=http://prometheus:9090
-
 # Каждый день в 9:00 UTC
-0 9 * * * root /usr/local/bin/python /app/daily_report.py >> /var/log/cron.log 2>&1
+0 9 * * * root . /etc/environment && /usr/local/bin/python /app/daily_report.py >> /var/log/cron.log 2>&1
