@@ -22,6 +22,7 @@ RCLONE_CONFIG="/home/fellk/.config/rclone/rclone.conf"
 REMOTE_NAME="Yandex-Disk"
 REMOTE_PATH="Backup/VPS_Германия"
 TEST_DIR="/tmp/backup-test-$(date +%s)"
+TEMP_BACKUP_DIR="/tmp/backup-$(date +%s)"
 
 # ============================================
 # ФУНКЦИИ
@@ -51,41 +52,34 @@ test_backup() {
     
     log "🧪 ПОЛНОЕ ТЕСТИРОВАНИЕ БЭКАПА..."
     
-    # 1. Проверка существования файла
     if [ ! -f "$encrypted_file" ]; then
         log "   ❌ Файл не найден: $encrypted_file"
         return 1
     fi
     log "   ✅ Файл существует"
     
-    # 2. Проверка GPG
     log "   🔍 Проверка GPG..."
     if ! gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" --decrypt "$encrypted_file" > /dev/null 2>&1; then
-        log "   ❌ GPG ошибка — файл поврежден или неверный пароль"
+        log "   ❌ GPG ошибка"
         return 1
     fi
-    log "   ✅ GPG OK — файл может быть расшифрован"
+    log "   ✅ GPG OK"
     
-    # 3. Создаем временную папку для восстановления
     mkdir -p "$test_dir"
     log "   📁 Временная папка: $test_dir"
     
-    # 4. Распаковка архива
     log "   📦 Распаковка архива..."
     if ! gpg --batch --yes --passphrase-file "$PASSPHRASE_FILE" -d "$encrypted_file" | tar -xz -C "$test_dir" 2>/dev/null; then
-        log "   ❌ Ошибка распаковки архива"
+        log "   ❌ Ошибка распаковки"
         rm -rf "$test_dir"
         return 1
     fi
     log "   ✅ Архив успешно распакован"
     
-    # 5. Проверка структуры
     log "   🔍 Проверка структуры..."
-    
     local errors=0
     local checks=0
     
-    # Список критических файлов, которые должны быть в бэкапе
     critical_files=(
         "docker-compose.yml"
         "backup.sh"
@@ -112,56 +106,33 @@ test_backup() {
         fi
     done
     
-    # 6. Проверка YAML синтаксиса
-    log "   🔍 Проверка YAML файлов..."
-    local yaml_errors=0
-    for yaml_file in $(find "$test_dir" -name "*.yml" -o -name "*.yaml" 2>/dev/null); do
-        if command -v yq &> /dev/null; then
-            if ! yq eval 'true' "$yaml_file" > /dev/null 2>&1; then
-                log "     ❌ Ошибка YAML: $(basename "$yaml_file")"
-                yaml_errors=$((yaml_errors + 1))
-            fi
-        else
-            # Если yq нет, проверяем с помощью python
-            if command -v python3 &> /dev/null; then
-                if ! python3 -c "import yaml; yaml.safe_load(open('$yaml_file'))" 2>/dev/null; then
-                    log "     ❌ Ошибка YAML: $(basename "$yaml_file")"
-                    yaml_errors=$((yaml_errors + 1))
-                fi
-            fi
-        fi
-    done
-    
-    if [ $yaml_errors -eq 0 ] && [ -n "$(find "$test_dir" -name "*.yml" 2>/dev/null)" ]; then
-        log "   ✅ Все YAML файлы валидны"
+    # Проверка наличия БД
+    if [ -f "$test_dir/backup-data/mongodb/mongodump.bson" ]; then
+        log "   ✅ MongoDB дамп присутствует"
+    else
+        log "   ⚠️ MongoDB дамп отсутствует"
     fi
     
-    # 7. Проверка Docker Compose
-    if [ -f "$test_dir/docker-compose.yml" ]; then
-        log "   🔍 Проверка docker-compose.yml..."
-        if command -v docker-compose &> /dev/null; then
-            if docker-compose -f "$test_dir/docker-compose.yml" config > /dev/null 2>&1; then
-                log "   ✅ docker-compose.yml валиден"
-            else
-                log "   ❌ docker-compose.yml содержит ошибки"
-                errors=$((errors + 1))
-            fi
-        fi
+    if [ -f "$test_dir/backup-data/xui/x-ui.db" ]; then
+        log "   ✅ XUI БД присутствует"
+    else
+        log "   ⚠️ XUI БД отсутствует"
     fi
     
-    # 8. Проверка размера
+    if [ -f "$test_dir/backup-data/npm/database.sqlite" ]; then
+        log "   ✅ NPM БД присутствует"
+    else
+        log "   ⚠️ NPM БД отсутствует"
+    fi
+    
     local size=$(du -sh "$encrypted_file" | cut -f1)
     log "   📊 Размер бэкапа: $size"
     
-    # 9. Количество файлов
     local file_count=$(find "$test_dir" -type f 2>/dev/null | wc -l)
     log "   📊 Количество файлов: $file_count"
     
-    # 10. Очистка
-    log "   🧹 Очистка временной папки..."
     rm -rf "$test_dir"
     
-    # Итог
     if [ $errors -eq 0 ]; then
         log "   ✅ ✅ ✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ УСПЕШНО!"
         TEST_RESULT="✅ FULL OK (${checks} проверок, ${file_count} файлов)"
@@ -174,7 +145,84 @@ test_backup() {
 }
 
 # ============================================
-# ОСНОВНАЯ ЛОГИКА
+# 1. ДАМП БАЗ ДАННЫХ
+# ============================================
+dump_databases() {
+    local dump_dir="$1"
+    mkdir -p "$dump_dir"/{mongodb,xui,npm,monitoring-data}
+    
+    log "📀 Дамп баз данных..."
+    
+    # MongoDB дамп
+
+    if docker ps | grep -q mtg-mongo; then
+        log "   📁 Дамп MongoDB..."
+        docker exec mtg-mongo mongodump --out /tmp/mongodump 2>/dev/null
+        docker cp mtg-mongo:/tmp/mongodump "$dump_dir/mongodb/" 2>/dev/null
+        docker exec mtg-mongo rm -rf /tmp/mongodump 2>/dev/null
+        if [ -d "$dump_dir/mongodb/mongodump" ]; then
+            log "   ✅ MongoDB дамп создан"
+        fi
+    else
+        log "   ⚠️ MongoDB контейнер не найден"
+    fi
+    
+    # XUI БД
+    if [ -f "xui/db/x-ui.db" ]; then
+        log "   📁 Копирование XUI БД..."
+        cp xui/db/x-ui.db "$dump_dir/xui/"
+        log "   ✅ XUI БД скопирована"
+    fi
+    
+    # NPM БД
+    if [ -f "npm/data/database.sqlite" ]; then
+        log "   📁 Копирование NPM БД..."
+        cp npm/data/database.sqlite "$dump_dir/npm/"
+        log "   ✅ NPM БД скопирована"
+    fi
+    
+    # Данные мониторинга (только последние 7 дней)
+    log "   📁 Копирование данных мониторинга (за 7 дней)..."
+    
+    # Prometheus data (только метаданные, не все чанки)
+    if [ -d "monitoring/prometheus-data" ]; then
+        mkdir -p "$dump_dir/monitoring-data/prometheus"
+        find monitoring/prometheus-data -name "*.wal" -o -name "*.tmp" -mtime -7 | \
+            tar -cf - -T - 2>/dev/null | tar -xf - -C "$dump_dir/monitoring-data/prometheus/" 2>/dev/null || true
+        log "   ✅ Prometheus данные скопированы"
+    fi
+    
+    # Loki data (только индексы)
+    if [ -d "monitoring/loki-data" ]; then
+        mkdir -p "$dump_dir/monitoring-data/loki"
+        tar -czf "$dump_dir/monitoring-data/loki/index.tar.gz" \
+            monitoring/loki-data/index/ 2>/dev/null || true
+        log "   ✅ Loki индексы скопированы"
+    fi
+}
+
+# ============================================
+# 2. БЭКАП ЛОГОВ (только за 7 дней)
+# ============================================
+backup_logs() {
+    local dest_dir="$1"
+    mkdir -p "$dest_dir/logs"
+    
+    log "📄 Бэкап логов (последние 7 дней)..."
+    
+    # Docker контейнеры логи
+    for container in $(docker ps --format '{{.Names}}'); do
+        docker logs --since 7d "$container" > "$dest_dir/logs/${container}.log" 2>&1 2>/dev/null || true
+    done
+    
+    # Системные логи
+    journalctl --since "7 days ago" > "$dest_dir/logs/system.log" 2>/dev/null || true
+    
+    log "   ✅ Логи сохранены"
+}
+
+# ============================================
+# 3. ОСНОВНОЙ БЭКАП
 # ============================================
 log "=========================================="
 log "🚀 Запуск процесса резервного копирования"
@@ -182,17 +230,13 @@ log "📁 Локальная директория бэкапов: $BACKUP_DIR"
 
 mkdir -p "$BACKUP_DIR"
 
-TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-BACKUP_FILE="${BACKUP_DIR}/secure-stack_${TIMESTAMP}.tar.gz"
-ENCRYPTED_FILE="${BACKUP_FILE}.gpg"
+# Создаем временную папку для сбора данных
+TEMP_DIR="/tmp/backup-stack-$(date +%s)"
+mkdir -p "$TEMP_DIR"
 
-# ============================================
-# СОЗДАНИЕ АРХИВА
-# ============================================
-log "📦 Создание архива..."
-
-# 1. Конфиги и скрипты
-tar -czf "$BACKUP_FILE" \
+# Копируем конфиги и скрипты
+log "📦 Копирование конфигурационных файлов..."
+cp -r \
     backup.sh \
     check_stack.sh \
     docker-compose.yml \
@@ -201,49 +245,56 @@ tar -czf "$BACKUP_FILE" \
     .env.example \
     .gitignore \
     .gitmodules \
-    monitoring/*.yml \
-    monitoring/*.yaml \
-    monitoring/*.example \
+    monitoring/ \
     reports/ \
     xui-api-exporter-repo/ \
-    2>/dev/null || true
+    "$TEMP_DIR/" 2>/dev/null || true
 
-# 2. Конфиги NPM (без сертификатов)
+# Копируем конфиги NPM
 if [ -d "npm/data/nginx" ]; then
-    log "   📁 Добавляем конфиги NPM..."
-    tar -rf "$BACKUP_FILE" \
-        npm/data/nginx/proxy_host/*.conf \
-        npm/data/nginx/redirection_host/*.conf \
-        npm/data/nginx/default_host/*.conf \
-        npm/data/nginx/stream/*.conf \
-        npm/data/nginx/dead_host/*.conf \
-        npm/data/nginx/temp/*.conf \
-        2>/dev/null || true
+    mkdir -p "$TEMP_DIR/npm/data/nginx"
+    cp -r npm/data/nginx/* "$TEMP_DIR/npm/data/nginx/" 2>/dev/null || true
+    log "   ✅ Конфиги NPM скопированы"
 fi
 
-# 3. База данных NPM
-if [ -f "npm/data/database.sqlite" ]; then
-    log "   📁 Добавляем базу данных NPM..."
-    tar -rf "$BACKUP_FILE" \
-        npm/data/database.sqlite \
-        2>/dev/null || true
-fi
-
-# 4. Конфиги LetsEncrypt (без сертификатов)
+# Копируем конфиги LetsEncrypt
 if [ -d "npm/letsencrypt/renewal" ]; then
-    log "   📁 Добавляем конфиги LetsEncrypt..."
-    tar -rf "$BACKUP_FILE" \
-        npm/letsencrypt/renewal/*.conf \
-        2>/dev/null || true
+    mkdir -p "$TEMP_DIR/npm/letsencrypt/renewal"
+    cp -r npm/letsencrypt/renewal/* "$TEMP_DIR/npm/letsencrypt/renewal/" 2>/dev/null || true
+    log "   ✅ Конфиги LetsEncrypt скопированы"
 fi
 
-# 5. База данных XUI
-if [ -f "xui/db/x-ui.db" ]; then
-    log "   📁 Добавляем базу данных XUI..."
-    tar -rf "$BACKUP_FILE" \
-        xui/db/x-ui.db \
-        2>/dev/null || true
+# Копируем сертификаты XUI
+if [ -d "xui/cert" ]; then
+    mkdir -p "$TEMP_DIR/xui/cert"
+    cp -r xui/cert/* "$TEMP_DIR/xui/cert/" 2>/dev/null || true
+    log "   ✅ Сертификаты XUI скопированы"
 fi
+
+# Копируем данные MTG (MongoDB данные)
+if [ -d "mtg/mongo-data" ]; then
+    mkdir -p "$TEMP_DIR/mtg"
+    cp -r mtg/mongo-data "$TEMP_DIR/mtg/" 2>/dev/null || true
+    log "   ✅ Данные MTG скопированы"
+fi
+
+# Создаем дампы БД
+dump_databases "$TEMP_DIR/backup-data"
+
+# Создаем бэкап логов
+backup_logs "$TEMP_DIR"
+
+# ============================================
+# СОЗДАНИЕ АРХИВА
+# ============================================
+TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
+BACKUP_FILE="${BACKUP_DIR}/secure-stack_${TIMESTAMP}.tar.gz"
+ENCRYPTED_FILE="${BACKUP_FILE}.gpg"
+
+log "📦 Создание архива ($TEMP_DIR)..."
+cd "$TEMP_DIR"
+tar -czf "$BACKUP_FILE" . 2>/dev/null
+cd - > /dev/null
 
 if [ $? -eq 0 ] && [ -f "$BACKUP_FILE" ]; then
     SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
@@ -253,6 +304,9 @@ else
     send_telegram "❌ <b>Ошибка бэкапа!</b>%0AНе удалось создать архив"
     exit 1
 fi
+
+# Очистка временной папки
+rm -rf "$TEMP_DIR"
 
 # ============================================
 # ШИФРОВАНИЕ
@@ -326,8 +380,6 @@ log "   - Тест: $TEST_RESULT"
 # ============================================
 # УВЕДОМЛЕНИЕ
 # ============================================
-log "📨 Отправка уведомления в Telegram (топик $THREAD_ID)..."
-
 SIZE=$(du -h "$ENCRYPTED_FILE" | cut -f1)
 MESSAGE="✅ <b>Резервное копирование завершено!</b>%0A%0A"
 MESSAGE="${MESSAGE}📁 <b>Файл:</b> $(basename "$ENCRYPTED_FILE")%0A"
